@@ -3,73 +3,80 @@ set -euo pipefail
 
 # =============================================================================
 # Helper Script - Join control planes adicionais ao cluster
-# Execute este script no host (não na VM)
+# Com suporte a kube-vip para HA (VIP dinamico)
 # =============================================================================
 
 echo "=== CKA Lab - Join Control Planes Helper ==="
 
-# Obtém o IP do control-plane-1 (filtra warnings)
-CP1_IP=$(vagrant ssh control-plane-1 -c "hostname -I | awk '{print \$1}'" 2>/dev/null | grep -v "warning:" | grep -v "^$" | tr -d '\r\n' | awk '{print $1}')
+# Obtem o VIP do control-plane-1
+echo "[INFO] Obtendo VIP do cluster..."
+VIP=$(vagrant ssh control-plane-1 -- -T "sudo cat /root/control-plane-vip.txt" 2>/dev/null | tr -d '\r\n')
 
-if [ -z "$CP1_IP" ]; then
-  echo "❌ Erro: Não foi possível obter o IP do control-plane-1"
-  echo "   Verifique se o control-plane-1 está rodando: vagrant status"
-  exit 1
+if [ -z "$VIP" ]; then
+  echo "[WARN] VIP nao encontrado, calculando baseado no IP..."
+  CP1_IP=$(vagrant ssh control-plane-1 -- -T "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')
+  IP_PREFIX=$(echo "$CP1_IP" | cut -d'.' -f1-3)
+  VIP="${IP_PREFIX}.100"
 fi
 
-echo "✅ Control Plane 1 IP: ${CP1_IP}"
+echo "[OK] VIP: ${VIP}"
 
-# Obtém o comando de join para control-plane (filtra warnings e pega só a linha do kubeadm)
-echo "📋 Obtendo comando de join para control-plane..."
-JOIN_CMD=$(vagrant ssh control-plane-1 -c "sudo cat /root/join-control-plane.sh" 2>/dev/null | grep -v "warning:" | grep "kubeadm join" | tr -d '\r')
+# Obtem o comando de join para control-plane
+echo "[INFO] Obtendo comando de join para control-plane..."
+JOIN_CMD=$(vagrant ssh control-plane-1 -- -T "sudo cat /root/join-control-plane.sh" 2>/dev/null | grep "kubeadm join" | tr -d '\r')
 
 if [ -z "$JOIN_CMD" ]; then
-  echo "❌ Erro: Não foi possível obter o comando de join"
-  echo "   Verifique se o kubeadm init completou com sucesso"
-  echo "   Tente: vagrant ssh control-plane-1 -c 'sudo cat /root/join-control-plane.sh'"
+  echo "[ERROR] Nao foi possivel obter o comando de join"
+  echo "        Verifique se o kubeadm init completou com sucesso"
   exit 1
 fi
 
-echo "✅ Comando de join obtido"
+echo "[OK] Comando de join obtido"
 echo ""
 
-# Lista control planes disponíveis (exceto o 1)
+# Lista control planes disponiveis (exceto o 1)
 CONTROL_PLANES=$(vagrant status 2>/dev/null | grep control-plane | grep running | awk '{print $1}' | grep -v "control-plane-1")
 
 if [ -z "$CONTROL_PLANES" ]; then
-  echo "⚠️  Nenhum control plane adicional rodando"
-  echo "   Inicie os control planes: vagrant up control-plane-2 control-plane-3"
+  echo "[WARN] Nenhum control plane adicional rodando"
+  echo "       Inicie os control planes: vagrant up control-plane-2 control-plane-3"
   exit 0
 fi
 
-echo "🔄 Control Planes disponíveis para join:"
+echo "[INFO] Control Planes disponiveis para join:"
 echo "$CONTROL_PLANES"
 echo ""
 
 # Join cada control plane
 for CP in $CONTROL_PLANES; do
-  echo "➡️  Fazendo join do ${CP}..."
+  echo "[INFO] Fazendo join do ${CP}..."
   
-  # Verifica se já está no cluster
-  ALREADY_JOINED=$(vagrant ssh "$CP" -c "test -f /etc/kubernetes/admin.conf && echo yes || echo no" 2>/dev/null | grep -v "warning:" | tr -d '\r\n')
+  # Verifica se ja esta no cluster
+  ALREADY_JOINED=$(vagrant ssh "$CP" -- -T "test -f /etc/kubernetes/admin.conf && echo yes || echo no" 2>/dev/null | tr -d '\r\n')
   
   if [ "$ALREADY_JOINED" = "yes" ]; then
-    echo "   ✅ ${CP} já está no cluster"
+    echo "       [OK] ${CP} ja esta no cluster"
   else
-    # Executa o join
-    echo "   🔧 Executando join (isso pode demorar alguns minutos)..."
-    vagrant ssh "$CP" -c "sudo ${JOIN_CMD}" 2>&1 | grep -v "warning:" || true
+    # Detecta a interface de rede e atualiza o manifest do kube-vip
+    echo "       [INFO] Atualizando manifest do kube-vip..."
+    IFACE=$(vagrant ssh "$CP" -- -T "ip route | grep default | awk '{print \$5}' | head -1" 2>/dev/null | tr -d '\r\n')
     
-    # Configura kubectl para o usuário vagrant
-    vagrant ssh "$CP" -c "sudo mkdir -p /home/vagrant/.kube && sudo cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config && sudo chown -R vagrant:vagrant /home/vagrant/.kube" 2>&1 | grep -v "warning:" || true
+    vagrant ssh "$CP" -- -T "sudo sed -i 's/value: \"eth0\"/value: \"${IFACE}\"/' /etc/kubernetes/manifests/kube-vip.yaml 2>/dev/null || true" || true
     
-    echo "   ✅ ${CP} adicionado ao cluster"
+    echo "       [INFO] Executando join (isso pode demorar alguns minutos)..."
+    vagrant ssh "$CP" -- -T "sudo ${JOIN_CMD}" 2>&1 || true
+    
+    # Configura kubectl para o usuario vagrant
+    vagrant ssh "$CP" -- -T "sudo mkdir -p /home/vagrant/.kube && sudo cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config && sudo chown -R vagrant:vagrant /home/vagrant/.kube" 2>&1 || true
+    
+    echo "       [OK] ${CP} adicionado ao cluster"
   fi
 done
 
 echo ""
-echo "✅ Join completo!"
+echo "[OK] Join completo!"
 echo ""
-echo "📋 Verificando nodes:"
-vagrant ssh control-plane-1 -c "kubectl get nodes -owide" 2>&1 | grep -v "warning:"
-
+echo "[INFO] VIP do API Server: ${VIP}:6443"
+echo ""
+echo "[INFO] Verificando nodes:"
+kubectl get nodes -owide 2>/dev/null || vagrant ssh control-plane-1 -- -T "kubectl get nodes -owide"

@@ -26,3 +26,4 @@ apt-mark hold kubectl >/dev/null 2>&1 || true
 
 echo "=== [INFO] Worker node ready for manual join ==="
 echo "=== [INFO] ${HOSTNAME} setup completed ==="
+ 

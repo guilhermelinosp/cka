@@ -1,0 +1,27 @@
+---
+# MetalLB IP Address Pool
+# Usa o range .200-.250 da rede 192.168.122.0/24 (libvirt default)
+# NOTA: .100 e reservado para o VIP do kube-vip (API Server HA)
+# 
+# Se sua rede for diferente, ajuste o range abaixo ou use o script:
+# IP_PREFIX=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' | cut -d'.' -f1-3)
+# sed -i "s/192.168.122/${IP_PREFIX}/g" manifests/metallb-config.yaml
+#
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.122.200-192.168.122.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - default-pool
+
