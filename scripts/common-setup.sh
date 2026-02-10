@@ -7,6 +7,11 @@ set -euo pipefail
 
 HOSTNAME=$(hostname)
 K8S_VERSION="v1.35"
+K8S_FULL_VERSION="v1.35.0"
+PAUSE_IMAGE="registry.k8s.io/pause:3.10.1"
+COREDNS_IMAGE="registry.k8s.io/coredns/coredns:v1.13.1"
+ETCD_IMAGE="registry.k8s.io/etcd:3.5.21-0"
+KUBE_VIP_IMAGE="ghcr.io/kube-vip/kube-vip:v0.8.7"
 
 echo "=== [INFO] Common setup on ${HOSTNAME} ==="
 
@@ -105,6 +110,20 @@ echo "=== [INFO] Installing kubelet and kubeadm ==="
 
 apt-get install -y -qq kubelet kubeadm cri-tools >/dev/null
 apt-mark hold kubelet kubeadm >/dev/null
+
+########################################
+# Pre-pull de imagens (acelera provisionamento)
+########################################
+echo "=== [INFO] Pre-pulling Kubernetes images ==="
+
+crictl pull "${PAUSE_IMAGE}" >/dev/null 2>&1 || true
+crictl pull "${COREDNS_IMAGE}" >/dev/null 2>&1 || true
+crictl pull "${ETCD_IMAGE}" >/dev/null 2>&1 || true
+crictl pull "registry.k8s.io/kube-apiserver:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
+crictl pull "registry.k8s.io/kube-controller-manager:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
+crictl pull "registry.k8s.io/kube-scheduler:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
+crictl pull "registry.k8s.io/kube-proxy:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
+crictl pull "${KUBE_VIP_IMAGE}" >/dev/null 2>&1 || true
 
 echo "=== [INFO] Common setup completed on ${HOSTNAME} ==="
 

@@ -1,0 +1,162 @@
+---
+# HostPath Provisioner DaemonSet para CKA Lab
+# Baseado no Rancher Local Path Provisioner
+#
+# NOTA DE SEGURANCA:
+# Container configurado com boas praticas de seguranca:
+# - Todas as capabilities removidas (drop: ALL)
+# - Sem privilege escalation
+# - Root filesystem read-only
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hostpath-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hostpath-provisioner
+  namespace: hostpath-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hostpath-provisioner
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "nodes", "persistentvolumeclaims", "configmaps", "pods", "pods/log" ]
+    verbs: [ "get", "list", "watch" ]
+  - apiGroups: [ "" ]
+    resources: [ "persistentvolumes" ]
+    verbs: [ "get", "list", "watch", "create", "patch", "update", "delete" ]
+  - apiGroups: [ "" ]
+    resources: [ "events" ]
+    verbs: [ "create", "patch" ]
+  - apiGroups: [ "storage.k8s.io" ]
+    resources: [ "storageclasses" ]
+    verbs: [ "get", "list", "watch" ]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hostpath-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: hostpath-provisioner
+    namespace: hostpath-system
+roleRef:
+  kind: ClusterRole
+  name: hostpath-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: hostpath-system
+data:
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": [
+            "/var/lib/hostpath-provisioner"]
+        }
+      ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+        - name: helper-pod
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hostpath-provisioner
+  namespace: hostpath-system
+  labels:
+    app: hostpath-provisioner
+spec:
+  selector:
+    matchLabels:
+      app: hostpath-provisioner
+  template:
+    metadata:
+      labels:
+        app: hostpath-provisioner
+      annotations:
+        # O provisioner precisa rodar como root para criar/remover diretorios
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+    spec:
+      serviceAccountName: hostpath-provisioner
+      containers:
+        - name: provisioner
+          image: rancher/local-path-provisioner:v0.0.30
+          imagePullPolicy: IfNotPresent
+          command:
+            - local-path-provisioner
+            - start
+            - --config
+            - /etc/config/config.json
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hostpath
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+

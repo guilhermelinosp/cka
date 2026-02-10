@@ -49,6 +49,8 @@ Ambiente de laboratorio para estudo da certificacao **CKA (Certified Kubernetes 
 | **API Server HA**     | kube-vip (VIP dinamico: x.x.x.100)   |
 | **Load Balancer**     | MetalLB (L2 mode)                    |
 | **Ingress**           | NGINX Ingress Controller (DaemonSet) |
+| **Storage**           | HostPath Provisioner (DaemonSet)     |
+| **Metrics**           | Metrics Server (kubectl top)         |
 | **Pod CIDR**          | 10.0.0.0/16                          |
 
 ## Quick Start
@@ -123,8 +125,9 @@ cka/
 ├── export-kubeconfig.sh        # Exporta kubeconfig para o host
 ├── join-workers.sh             # Join workers ao cluster
 ├── join-control-planes.sh      # Join control planes ao cluster
-├── install-addons.sh           # Instala MetalLB e NGINX Ingress
+├── install-addons.sh           # Instala addons (Storage, LB, Ingress)
 ├── manifests/
+│   ├── hostpath-provisioner.yaml     # HostPath Provisioner DaemonSet
 │   ├── metallb-config.yaml           # IP Pool do MetalLB
 │   ├── ingress-nginx-daemonset.yaml  # NGINX Ingress DaemonSet
 │   └── ingress-nginx-service.yaml    # NGINX Ingress Service (LoadBalancer)

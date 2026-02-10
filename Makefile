@@ -6,6 +6,9 @@
 
 .PHONY: help up cp1 workers ha addons all down destroy status kubeconfig clean test
 
+# Suprime warnings do fog-libvirt (issue hashicorp/vagrant#13544)
+export RUBYOPT := -W0
+
 # Cores para output
 GREEN := \033[0;32m
 YELLOW := \033[0;33m
@@ -26,36 +29,32 @@ help: ## Mostra esta ajuda
 # Criacao do Cluster
 # =============================================================================
 
-cp1: ## Inicia o control-plane-1 (primario)
+start: ## Inicia o control-maaa	plane-1 (primario)
 	@echo "$(GREEN)[INFO] Iniciando control-plane-1...$(NC)"
 	vagrant up control-plane-1
 	@echo "$(GREEN)[OK] control-plane-1 iniciado$(NC)"
 
 kubeconfig: ## Exporta o kubeconfig para o host
 	@echo "$(GREEN)[INFO] Exportando kubeconfig...$(NC)"
-	./export-kubeconfig.sh
+	./scripts/export-kubeconfig.sh
 
 workers: ## Inicia todos os workers e faz join
 	@echo "$(GREEN)[INFO] Iniciando workers...$(NC)"
 	vagrant up worker-node-1 worker-node-2 worker-node-3 worker-node-4 worker-node-5 worker-node-6 --parallel
 	@echo "$(GREEN)[INFO] Fazendo join dos workers...$(NC)"
-	./join-workers.sh
+	./scripts/join-workers.sh
 
 ha: ## Inicia control-planes 2 e 3 e faz join (HA)
 	@echo "$(GREEN)[INFO] Iniciando control-planes 2 e 3...$(NC)"
 	vagrant up control-plane-2 control-plane-3 --parallel
 	@echo "$(GREEN)[INFO] Fazendo join dos control-planes...$(NC)"
-	./join-control-planes.sh
+	./scripts/join-control-planes.sh
 
 addons: ## Instala MetalLB e NGINX Ingress
 	@echo "$(GREEN)[INFO] Instalando addons...$(NC)"
-	./install-addons.sh
+	./scripts/install-addons.sh
 
-up: cp1 kubeconfig ## Inicia o control-plane-1 e exporta kubeconfig
-	@echo "$(GREEN)[OK] Cluster basico iniciado$(NC)"
-	@echo "$(YELLOW)[INFO] Proximo passo: make workers$(NC)"
-
-all: cp1 kubeconfig workers ha addons ## Cria o cluster completo (CP + Workers + HA + Addons)
+up: start kubeconfig workers ha addons ## Cria o cluster completo (CP + Workers + HA + Addons)
 	@echo ""
 	@echo "$(GREEN)=== Cluster CKA Lab criado com sucesso! ===$(NC)"
 	@echo ""
@@ -72,33 +71,16 @@ status: ## Mostra o status das VMs e nodes
 	@echo "$(GREEN)=== Status dos Nodes ===$(NC)"
 	@kubectl get nodes -owide 2>/dev/null || echo "$(YELLOW)[WARN] kubectl nao configurado. Execute: make kubeconfig$(NC)"
 
-down: ## Para todas as VMs (preserva dados)
-	@echo "$(YELLOW)[INFO] Parando todas as VMs...$(NC)"
-	vagrant halt
-	@echo "$(GREEN)[OK] VMs paradas$(NC)"
-
 resume: ## Retoma todas as VMs paradas
 	@echo "$(GREEN)[INFO] Retomando VMs...$(NC)"
 	vagrant up
 	@echo "$(GREEN)[OK] VMs retomadas$(NC)"
 
-destroy: ## Destroi todas as VMs (APAGA TUDO)
+down: ## Destroi todas as VMs (APAGA TUDO)
 	@echo "$(RED)[WARN] Isso vai DESTRUIR todas as VMs!$(NC)"
-	@read -p "Tem certeza? (y/N) " confirm && [ "$$confirm" = "y" ] || exit 1
 	vagrant destroy -f
 	rm -f ~/.kube/config
 	@echo "$(GREEN)[OK] Cluster destruido$(NC)"
-
-clean: destroy ## Alias para destroy
-
-vip: ## Mostra o VIP do API Server
-	@VIP=$$(grep "server:" ~/.kube/config 2>/dev/null | awk -F'[:/]' '{print $$4}'); \
-	if [ -n "$$VIP" ]; then \
-		echo "$(GREEN)VIP do API Server: $$VIP$(NC)"; \
-		echo "$(GREEN)API Server: https://$$VIP:6443$(NC)"; \
-	else \
-		echo "$(YELLOW)[WARN] kubeconfig nao encontrado. Execute: make kubeconfig$(NC)"; \
-	fi
 
 ssh-cp1: ## SSH no control-plane-1
 	vagrant ssh control-plane-1

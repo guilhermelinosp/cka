@@ -1,6 +1,7 @@
 # Vagrant
 .vagrant/
 
+
 # IDE
 .idea/
 .vscode/

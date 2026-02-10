@@ -8,7 +8,11 @@ set -euo pipefail
 
 HOSTNAME=$(hostname)
 NODE_NUMBER="${NODE_NUMBER:-1}"
+K8S_FULL_VERSION="v1.35.0"
 POD_CIDR="10.0.0.0/16"
+POD_CIDR_MASK_SIZE="24"
+VIP_SUFFIX="100"
+KUBE_VIP_IMAGE="ghcr.io/kube-vip/kube-vip:v0.8.7"
 
 # Detecta o IP da interface principal
 NODE_IP=$(hostname -I | awk '{print $1}')
@@ -16,9 +20,9 @@ NODE_IP=$(hostname -I | awk '{print $1}')
 # Detecta a interface de rede principal
 VIP_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
 
-# Calcula o VIP baseado no IP do node (usa .100 do mesmo range)
+# Calcula o VIP baseado no IP do node (usa .VIP_SUFFIX do mesmo range)
 IP_PREFIX=$(echo "$NODE_IP" | cut -d'.' -f1-3)
-VIP="${IP_PREFIX}.100"
+VIP="${IP_PREFIX}.${VIP_SUFFIX}"
 
 echo "=== [INFO] Control Plane setup on ${HOSTNAME} (node ${NODE_NUMBER}) ==="
 echo "=== [INFO] Detected IP: ${NODE_IP} ==="
@@ -52,7 +56,7 @@ metadata:
 spec:
   containers:
   - name: kube-vip
-    image: ghcr.io/kube-vip/kube-vip:v0.8.7
+    image: ${KUBE_VIP_IMAGE}
     imagePullPolicy: IfNotPresent
     args:
     - manager
@@ -127,7 +131,7 @@ nodeRegistration:
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: v1.35.0
+kubernetesVersion: ${K8S_FULL_VERSION}
 controlPlaneEndpoint: "${NODE_IP}:6443"
 networking:
   podSubnet: ${POD_CIDR}
@@ -205,7 +209,7 @@ EOF
       --set k8sServicePort=6443 \
       --set ipam.mode=cluster-pool \
       --set ipam.operator.clusterPoolIPv4PodCIDRList="{${POD_CIDR}}" \
-      --set ipam.operator.clusterPoolIPv4MaskSize=24 || true
+      --set ipam.operator.clusterPoolIPv4MaskSize="${POD_CIDR_MASK_SIZE}" || true
   fi
 
   ########################################
