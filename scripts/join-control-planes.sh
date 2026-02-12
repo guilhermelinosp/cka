@@ -42,8 +42,8 @@ if [ -z "$CONTROL_PLANES" ]; then
   echo "       Inicie os control planes: vagrant up control-plane-2 control-plane-3"
   exit 0
 fi
-
 echo "[INFO] Control Planes disponiveis para join:"
+
 echo "$CONTROL_PLANES"
 echo ""
 
