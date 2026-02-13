@@ -1,0 +1,74 @@
+# =============================================================================
+# Longhorn Storage Configuration for CKA Lab
+# =============================================================================
+# Configuracao customizada para ambiente de lab
+# - StorageClasses adicionais com diferentes niveis de replica
+# - UI acessivel via NodePort
+#
+# NOTA: A StorageClass "longhorn" padrao e criada automaticamente pelo Longhorn
+# Este arquivo adiciona StorageClasses extras para diferentes casos de uso
+# =============================================================================
+---
+# StorageClass para volumes com replicas em todos os workers (max HA)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-ha
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "__REPLICAS_HA__"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+---
+# StorageClass para volumes com replicas minimas (min HA)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-min
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "__REPLICAS_MIN__"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+---
+# StorageClass para volumes sem replica (single node, mais rapido)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-single
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+---
+# Service NodePort para acessar a UI do Longhorn
+apiVersion: v1
+kind: Service
+metadata:
+  name: longhorn-frontend-nodeport
+  namespace: longhorn-system
+  labels:
+    app: longhorn-ui
+spec:
+  type: NodePort
+  selector:
+    app: longhorn-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      nodePort: 30080
+

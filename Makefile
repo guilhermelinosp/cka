@@ -15,10 +15,16 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-up: ## Cria o cluster completo (CP + Workers + HA + Addons)
+up: ## Cria o cluster completo (HAProxy + CP + Workers + HA + Addons)
+	@echo "$(GREEN)[INFO] Iniciando HAProxy Load Balancer...$(NC)"
+	vagrant up haproxy
+	@echo "$(GREEN)[OK] HAProxy iniciado$(NC)"
 	@echo "$(GREEN)[INFO] Iniciando control-plane-1...$(NC)"
 	vagrant up control-plane-1
 	@echo "$(GREEN)[OK] control-plane-1 iniciado$(NC)"
+	@echo "$(GREEN)[INFO] Registrando control-plane-1 no HAProxy...$(NC)"
+	@CP1_IP=$$(vagrant ssh control-plane-1 -- -T "hostname -I | awk '{print \$$1}'" 2>/dev/null | tr -d '\r\n'); \
+	vagrant ssh haproxy -- -T "sudo /usr/local/bin/register-control-plane.sh control-plane-1 $$CP1_IP"
 	@echo "$(GREEN)[INFO] Exportando kubeconfig...$(NC)"
 	./scripts/export-kubeconfig.sh
 	@echo "$(GREEN)[INFO] Iniciando workers...$(NC)"
@@ -38,5 +44,31 @@ up: ## Cria o cluster completo (CP + Workers + HA + Addons)
 
 down: ## Destroi todas as VMs do cluster
 	@echo "$(RED)[INFO] Destruindo todas as VMs...$(NC)"
-	vagrant destroy -f
+	vagrant destroy -f; rm -rf .vagrant
 	@echo "$(GREEN)[OK] Cluster destruído$(NC)"
+
+haproxy: ## Mostra status e IP do HAProxy
+	@echo "$(GREEN)=== HAProxy Load Balancer ===$(NC)"
+	@HAPROXY_IP=$$(vagrant ssh haproxy -- -T "hostname -I | awk '{print \$$1}'" 2>/dev/null | tr -d '\r\n'); \
+	echo "IP: $$HAPROXY_IP"; \
+	echo "API Server: https://$$HAPROXY_IP:6443"; \
+	echo "Stats Page: http://$$HAPROXY_IP:8404/stats (admin:admin)"; \
+	echo ""; \
+	echo "$(YELLOW)Backends registrados:$(NC)"; \
+	vagrant ssh haproxy -- -T "grep 'server control-plane' /etc/haproxy/haproxy.cfg 2>/dev/null || echo 'Nenhum backend registrado'"
+
+longhorn: ## Mostra status do Longhorn storage
+	@echo "$(GREEN)=== Longhorn Storage ===$(NC)"
+	@echo ""
+	@echo "$(YELLOW)StorageClasses:$(NC)"
+	@kubectl get storageclass 2>/dev/null || echo "kubectl nao configurado"
+	@echo ""
+	@echo "$(YELLOW)Longhorn Pods:$(NC)"
+	@kubectl get pods -n longhorn-system 2>/dev/null | head -15 || echo "Longhorn nao instalado"
+	@echo ""
+	@echo "$(YELLOW)Volumes:$(NC)"
+	@kubectl get pvc -A 2>/dev/null || true
+	@echo ""
+	@WORKER_IP=$$(vagrant ssh worker-node-1 -- -T "hostname -I | awk '{print \$$1}'" 2>/dev/null | tr -d '\r\n'); \
+	echo "$(GREEN)UI do Longhorn: http://$$WORKER_IP:30080$(NC)"
+

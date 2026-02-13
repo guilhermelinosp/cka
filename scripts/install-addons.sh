@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# Addons Setup - Metrics Server, HostPath Provisioner, MetalLB e NGINX Ingress
+# Addons Setup - Metrics Server, Longhorn, MetalLB e NGINX Ingress
 # Requer kubectl configurado no host (execute export-kubeconfig.sh primeiro)
 # =============================================================================
 
@@ -36,20 +36,71 @@ kubectl wait --namespace kube-system \
 echo "[OK] Metrics Server instalado (kubectl top nodes/pods)"
 
 ########################################
-# HostPath Provisioner (Storage)
+# Longhorn (Distributed Storage)
 ########################################
 echo ""
-echo "[INFO] Instalando HostPath Provisioner..."
+echo "[INFO] Instalando Longhorn..."
 
-kubectl apply -f "${MANIFESTS_DIR}/hostpath-provisioner.yaml"
+# Versao estavel do Longhorn
+LONGHORN_VERSION="v1.7.2"
 
-echo "[INFO] Aguardando HostPath Provisioner..."
-kubectl wait --namespace hostpath-system \
+# Conta o numero de workers (nodes sem role control-plane)
+WORKER_COUNT=$(kubectl get nodes --no-headers | grep -v control-plane | wc -l)
+echo "[INFO] Workers detectados: ${WORKER_COUNT}"
+
+# Calcula replicas dinamicamente baseado no numero de workers
+# - REPLICAS_HA: todos os workers (max HA)
+# - REPLICAS_DEFAULT: metade dos workers, minimo 2, maximo workers
+# - REPLICAS_MIN: minimo para HA (2 ou 1 se so tiver 1 worker)
+if [ "$WORKER_COUNT" -le 1 ]; then
+  REPLICAS_HA=1
+  REPLICAS_DEFAULT=1
+  REPLICAS_MIN=1
+elif [ "$WORKER_COUNT" -le 3 ]; then
+  REPLICAS_HA=$WORKER_COUNT
+  REPLICAS_DEFAULT=2
+  REPLICAS_MIN=2
+else
+  REPLICAS_HA=$WORKER_COUNT
+  REPLICAS_DEFAULT=$(( (WORKER_COUNT + 1) / 2 ))  # Arredonda para cima
+  REPLICAS_MIN=2
+fi
+
+echo "[INFO] Configurando replicas: HA=${REPLICAS_HA}, Default=${REPLICAS_DEFAULT}, Min=${REPLICAS_MIN}"
+
+# Instala o Longhorn via manifest oficial
+kubectl apply -f "https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml"
+
+echo "[INFO] Aguardando Longhorn pods (isso pode demorar alguns minutos)..."
+
+# Aguarda o namespace ser criado
+sleep 10
+
+# Aguarda os pods principais do Longhorn
+kubectl wait --namespace longhorn-system \
   --for=condition=ready pod \
-  --selector=app=hostpath-provisioner \
-  --timeout=120s || true
+  --selector=app=longhorn-manager \
+  --timeout=300s || true
 
-echo "[OK] HostPath Provisioner instalado (StorageClass padrao: hostpath)"
+kubectl wait --namespace longhorn-system \
+  --for=condition=ready pod \
+  --selector=app=longhorn-driver-deployer \
+  --timeout=180s || true
+
+# Aplica configuracoes customizadas (StorageClasses adicionais e NodePort UI)
+# A StorageClass "longhorn" padrao e criada automaticamente pelo Longhorn
+echo "[INFO] Aplicando StorageClasses adicionais e NodePort para UI..."
+sed -e "s/__REPLICAS_HA__/${REPLICAS_HA}/g" \
+    -e "s/__REPLICAS_DEFAULT__/${REPLICAS_DEFAULT}/g" \
+    -e "s/__REPLICAS_MIN__/${REPLICAS_MIN}/g" \
+    "${MANIFESTS_DIR}/longhorn-config.yaml" | kubectl apply -f -
+
+# Marca a StorageClass longhorn como default (se ainda nao estiver)
+kubectl annotate storageclass longhorn storageclass.kubernetes.io/is-default-class=true --overwrite 2>/dev/null || true
+
+echo "[OK] Longhorn instalado"
+echo "[INFO] StorageClasses: longhorn (default), longhorn-ha(${REPLICAS_HA}), longhorn-min(${REPLICAS_MIN}), longhorn-single(1)"
+echo "[INFO] UI do Longhorn disponivel em: http://<node-ip>:30080"
 
 ########################################
 # MetalLB
@@ -109,12 +160,12 @@ echo "[INFO] Metrics Server:"
 kubectl get pods -n kube-system -l k8s-app=metrics-server
 
 echo ""
-echo "[INFO] StorageClass:"
+echo "[INFO] StorageClasses:"
 kubectl get storageclass
 
 echo ""
-echo "[INFO] HostPath Provisioner:"
-kubectl get pods -n hostpath-system
+echo "[INFO] Longhorn pods:"
+kubectl get pods -n longhorn-system | head -10
 
 echo ""
 echo "[INFO] MetalLB pods:"
@@ -132,4 +183,5 @@ echo ""
 echo "[OK] Addons instalados com sucesso!"
 echo ""
 echo "[INFO] Teste o Metrics Server com: kubectl top nodes"
+echo "[INFO] Acesse a UI do Longhorn em: http://<worker-ip>:30080"
 

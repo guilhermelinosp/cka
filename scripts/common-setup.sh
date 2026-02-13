@@ -11,7 +11,6 @@ K8S_FULL_VERSION="v1.35.0"
 PAUSE_IMAGE="registry.k8s.io/pause:3.10.1"
 COREDNS_IMAGE="registry.k8s.io/coredns/coredns:v1.13.1"
 ETCD_IMAGE="registry.k8s.io/etcd:3.5.21-0"
-KUBE_VIP_IMAGE="ghcr.io/kube-vip/kube-vip:v0.8.7"
 
 echo "=== [INFO] Common setup on ${HOSTNAME} ==="
 
@@ -72,7 +71,17 @@ apt-get install -y -qq \
   gnupg \
   jq \
   apt-transport-https \
+  open-iscsi \
+  nfs-common \
   >/dev/null
+
+########################################
+# Longhorn Prerequisites (iSCSI)
+########################################
+echo "=== [INFO] Configuring iSCSI for Longhorn ==="
+
+systemctl enable iscsid
+systemctl start iscsid
 
 ########################################
 # Containerd
@@ -123,7 +132,6 @@ crictl pull "registry.k8s.io/kube-apiserver:${K8S_FULL_VERSION}" >/dev/null 2>&1
 crictl pull "registry.k8s.io/kube-controller-manager:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
 crictl pull "registry.k8s.io/kube-scheduler:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
 crictl pull "registry.k8s.io/kube-proxy:${K8S_FULL_VERSION}" >/dev/null 2>&1 || true
-crictl pull "${KUBE_VIP_IMAGE}" >/dev/null 2>&1 || true
 
 echo "=== [INFO] Common setup completed on ${HOSTNAME} ==="
 

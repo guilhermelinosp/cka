@@ -10,8 +10,9 @@ Ambiente de laboratorio para estudo da certificacao **CKA (Certified Kubernetes 
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │                    ┌─────────────────────┐                      │
-│                    │  VIP: x.x.x.100     │                      │
-│                    │  (kube-vip)         │                      │
+│                    │      HAProxy        │                      │
+│                    │  Load Balancer      │                      │
+│                    │    :6443 → CP       │                      │
 │                    └──────────┬──────────┘                      │
 │                               │                                 │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
@@ -33,10 +34,11 @@ Ambiente de laboratorio para estudo da certificacao **CKA (Certified Kubernetes 
 
 ## Especificacoes
 
-| Componente    | Quantidade | vCPU | RAM | Rede |
-|---------------|------------|------|-----|------|
-| Control Plane | 3          | 2    | 2GB | DHCP |
-| Workers       | 6          | 1    | 1GB | DHCP |
+| Componente    | Quantidade | vCPU | RAM   | Rede |
+|---------------|------------|------|-------|------|
+| HAProxy       | 1          | 1    | 512MB | DHCP |
+| Control Plane | 3          | 2    | 4GB   | DHCP |
+| Workers       | 6          | 1    | 2GB   | DHCP |
 
 ### Stack Tecnologico
 
@@ -45,13 +47,13 @@ Ambiente de laboratorio para estudo da certificacao **CKA (Certified Kubernetes 
 | **OS**                | Debian Bookworm 64-bit               |
 | **Kubernetes**        | v1.35.0                              |
 | **Container Runtime** | Containerd                           |
-| **CNI**               | Cilium (kubeProxyReplacement=true)   |
-| **API Server HA**     | kube-vip (VIP dinamico: x.x.x.100)   |
+| **CNI**               | Calico (suporta NetworkPolicy)       |
+| **API Server HA**     | HAProxy (Load Balancer externo)      |
 | **Load Balancer**     | MetalLB (L2 mode)                    |
 | **Ingress**           | NGINX Ingress Controller (DaemonSet) |
-| **Storage**           | HostPath Provisioner (DaemonSet)     |
+| **Storage**           | Longhorn (distributed, replicated)   |
 | **Metrics**           | Metrics Server (kubectl top)         |
-| **Pod CIDR**          | 10.0.0.0/16                          |
+| **Pod CIDR**          | 192.168.0.0/16                       |
 
 ## Quick Start
 
@@ -149,7 +151,7 @@ cka/
 | `make addons` | Instala MetalLB e NGINX Ingress |
 | `make status` | Mostra status das VMs e nodes |
 | `make info` | Mostra informacoes detalhadas do cluster |
-| `make vip` | Mostra o VIP do API Server |
+| `make haproxy` | Mostra o IP do HAProxy e stats |
 | `make test` | Testa o cluster com deployment nginx |
 | `make test-clean` | Remove o deployment de teste |
 | `make down` | Para todas as VMs (preserva dados) |
@@ -157,25 +159,91 @@ cka/
 | `make destroy` | Destroi todas as VMs |
 | `make ssh-cp1` | SSH no control-plane-1 |
 
-## HA com kube-vip
+## HA com HAProxy
 
-O cluster usa **kube-vip** para alta disponibilidade do API Server:
+O cluster usa **HAProxy** para alta disponibilidade do API Server:
 
-- **VIP dinamico**: Calculado como `x.x.x.100` baseado no IP do node
-- **Leader election**: Um control-plane responde pelo VIP
-- **Failover automatico**: Se o leader cair, outro assume (~5s)
+- **Load Balancer externo**: HAProxy distribui trafego para todos os control planes
+- **Health checks**: HAProxy verifica saude dos backends automaticamente
+- **Failover automatico**: Se um control plane cair, o trafego vai para os outros
+- **Stats page**: Interface web para monitorar o HAProxy
 
 ```bash
-# Verificar kube-vip
-kubectl get pods -n kube-system | grep kube-vip
+# Verificar status do HAProxy
+vagrant ssh haproxy -- -T sudo systemctl status haproxy
 
-# Ver qual node tem o VIP
-make vip
+# Ver stats page (acesso via browser)
+# http://<haproxy-ip>:8404/stats
+# Credenciais: admin:admin
+
+# Verificar backends registrados
+vagrant ssh haproxy -- -T grep "server control-plane" /etc/haproxy/haproxy.cfg
 
 # Testar failover
 vagrant halt control-plane-1
 kubectl get nodes  # Ainda funciona!
 vagrant up control-plane-1
+```
+
+## Storage com Longhorn
+
+O cluster usa **Longhorn** para storage distribuido e replicado:
+
+- **Distributed**: Dados distribuidos entre os workers
+- **Replica-aware**: Replicas configuradas automaticamente baseado no numero de workers
+- **Kubernetes-native**: Integrado nativamente via CSI
+- **UI Web**: Interface grafica para gerenciamento
+
+### StorageClasses Disponiveis
+
+As replicas sao calculadas dinamicamente baseado no numero de workers:
+
+| StorageClass     | Replicas                  | Uso                              |
+|------------------|---------------------------|----------------------------------|
+| `longhorn`       | workers/2 (min 2)         | Padrao, balanco entre HA e performance |
+| `longhorn-ha`    | todos os workers          | Alta disponibilidade maxima      |
+| `longhorn-min`   | 2                         | HA minima                        |
+| `longhorn-single`| 1                         | Performance maxima (sem replica) |
+
+**Exemplo com 6 workers:**
+- `longhorn`: 3 replicas
+- `longhorn-ha`: 6 replicas
+- `longhorn-min`: 2 replicas
+- `longhorn-single`: 1 replica
+
+### Exemplo de Uso
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: meu-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn  # ou longhorn-ha, longhorn-min, longhorn-single
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+### Comandos Uteis
+
+```bash
+# Verificar pods do Longhorn
+kubectl get pods -n longhorn-system
+
+# Verificar volumes
+kubectl get volumes.longhorn.io -n longhorn-system
+
+# Verificar replicas
+kubectl get replicas.longhorn.io -n longhorn-system
+
+# Acessar UI do Longhorn (NodePort 30080)
+# http://<worker-ip>:30080
+
+# Verificar StorageClasses e numero de replicas
+kubectl get storageclass -o custom-columns=NAME:.metadata.name,REPLICAS:.parameters.numberOfReplicas
 ```
 # Subir control-plane-2 e control-plane-3
 vagrant up control-plane-2 control-plane-3
@@ -248,8 +316,9 @@ kubectl get nodes -owide
 # Verificar pods do sistema
 kubectl get pods -A
 
-# Verificar Cilium
-kubectl exec -n kube-system -it ds/cilium -- cilium status
+# Verificar Calico
+kubectl get pods -n calico-system
+kubectl get tigerastatus
 
 # Verificar MetalLB
 kubectl get pods -n metallb-system
@@ -272,7 +341,7 @@ curl http://<EXTERNAL-IP>
 
 - [x] Cluster Architecture, Installation & Configuration
 - [ ] Workloads & Scheduling
-- [ ] Services & Networking
+- [ ] Services & Networking (NetworkPolicy com Calico)
 - [ ] Storage
 - [ ] Troubleshooting
 
@@ -286,14 +355,15 @@ kubectl get nodes -owide
 ping <NODE-IP>
 ```
 
-### Cilium nao esta funcionando
+### Calico nao esta funcionando
 
 ```bash
 # Verificar status
-kubectl exec -n kube-system -it ds/cilium -- cilium status
+kubectl get tigerastatus
+kubectl get pods -n calico-system
 
 # Ver logs
-kubectl logs -n kube-system -l k8s-app=cilium
+kubectl logs -n calico-system -l k8s-app=calico-node
 ```
 
 ### Worker nao faz join

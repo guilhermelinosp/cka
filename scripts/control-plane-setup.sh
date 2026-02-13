@@ -2,32 +2,69 @@
 set -euo pipefail
 
 # =============================================================================
-# Control Plane Setup com kube-vip para HA
-# VIP e calculado dinamicamente baseado no IP do node
+# Control Plane Setup com HAProxy para HA
+# O HAProxy deve estar rodando antes de inicializar o cluster
 # =============================================================================
 
 HOSTNAME=$(hostname)
 NODE_NUMBER="${NODE_NUMBER:-1}"
 K8S_FULL_VERSION="v1.35.0"
-POD_CIDR="10.0.0.0/16"
-POD_CIDR_MASK_SIZE="24"
-VIP_SUFFIX="100"
-KUBE_VIP_IMAGE="ghcr.io/kube-vip/kube-vip:v0.8.7"
+POD_CIDR="192.168.0.0/16"
+CALICO_VERSION="v3.29.0"
 
 # Detecta o IP da interface principal
 NODE_IP=$(hostname -I | awk '{print $1}')
 
-# Detecta a interface de rede principal
-VIP_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-
-# Calcula o VIP baseado no IP do node (usa .VIP_SUFFIX do mesmo range)
-IP_PREFIX=$(echo "$NODE_IP" | cut -d'.' -f1-3)
-VIP="${IP_PREFIX}.${VIP_SUFFIX}"
-
 echo "=== [INFO] Control Plane setup on ${HOSTNAME} (node ${NODE_NUMBER}) ==="
 echo "=== [INFO] Detected IP: ${NODE_IP} ==="
-echo "=== [INFO] VIP: ${VIP} ==="
-echo "=== [INFO] Interface: ${VIP_INTERFACE} ==="
+
+########################################
+# Descobrir IP do HAProxy
+########################################
+discover_haproxy_ip() {
+  # Tenta descobrir o HAProxy via DNS/hosts ou varrer a rede
+  local HAPROXY_IP=""
+  
+  # Metodo 1: Arquivo de configuracao (se disponivel)
+  if [ -f /root/haproxy-ip.txt ]; then
+    HAPROXY_IP=$(cat /root/haproxy-ip.txt)
+  fi
+  
+  # Metodo 2: Tentar resolver via hostname
+  if [ -z "$HAPROXY_IP" ]; then
+    HAPROXY_IP=$(getent hosts haproxy 2>/dev/null | awk '{print $1}' || true)
+  fi
+  
+  # Metodo 3: Varrer IPs comuns no mesmo range
+  if [ -z "$HAPROXY_IP" ]; then
+    local IP_PREFIX=$(echo "$NODE_IP" | cut -d'.' -f1-3)
+    for i in $(seq 2 254); do
+      local TEST_IP="${IP_PREFIX}.${i}"
+      if [ "$TEST_IP" != "$NODE_IP" ]; then
+        if curl -sk --connect-timeout 1 "http://${TEST_IP}:8404/stats" &>/dev/null; then
+          HAPROXY_IP="$TEST_IP"
+          break
+        fi
+      fi
+    done
+  fi
+  
+  echo "$HAPROXY_IP"
+}
+
+echo "=== [INFO] Discovering HAProxy IP ==="
+HAPROXY_IP=$(discover_haproxy_ip)
+
+if [ -z "$HAPROXY_IP" ]; then
+  echo "=== [ERROR] Could not find HAProxy. Make sure haproxy VM is running ==="
+  echo "=== [INFO] You can set HAPROXY_IP manually in environment ==="
+  exit 1
+fi
+
+echo "=== [INFO] HAProxy IP: ${HAPROXY_IP} ==="
+
+# Salva o IP do HAProxy para uso posterior
+echo "${HAPROXY_IP}" > /root/haproxy-ip.txt
 
 ########################################
 # Instalar kubectl (control plane)
@@ -37,79 +74,41 @@ apt-get install -y -qq kubectl >/dev/null
 apt-mark hold kubectl >/dev/null 2>&1
 
 ########################################
-# kube-vip manifest (static pod)
+# Registrar no HAProxy
 ########################################
-generate_kube_vip_manifest() {
-  local VIP_ADDR=$1
-  local VIP_IFACE=$2
+register_in_haproxy() {
+  local NODE_NAME=$1
+  local NODE_IP=$2
+  local HAPROXY_IP=$3
   
-  echo "=== [INFO] Generating kube-vip manifest ==="
+  echo "=== [INFO] Registering ${NODE_NAME} (${NODE_IP}) in HAProxy (${HAPROXY_IP}) ==="
   
-  mkdir -p /etc/kubernetes/manifests
+  # Tenta registrar via SSH usando a chave do vagrant
+  # A chave insecure do vagrant geralmente está disponível durante o boot inicial
+  local SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes"
   
-  cat <<EOF >/etc/kubernetes/manifests/kube-vip.yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: kube-vip
-  namespace: kube-system
-spec:
-  containers:
-  - name: kube-vip
-    image: ${KUBE_VIP_IMAGE}
-    imagePullPolicy: IfNotPresent
-    args:
-    - manager
-    env:
-    - name: vip_arp
-      value: "true"
-    - name: port
-      value: "6443"
-    - name: vip_interface
-      value: "${VIP_IFACE}"
-    - name: vip_cidr
-      value: "32"
-    - name: dns_mode
-      value: "first"
-    - name: cp_enable
-      value: "true"
-    - name: cp_namespace
-      value: kube-system
-    - name: svc_enable
-      value: "false"
-    - name: vip_leaderelection
-      value: "true"
-    - name: vip_leasename
-      value: plndr-cp-lock
-    - name: vip_leaseduration
-      value: "5"
-    - name: vip_renewdeadline
-      value: "3"
-    - name: vip_retryperiod
-      value: "1"
-    - name: address
-      value: "${VIP_ADDR}"
-    - name: prometheus_server
-      value: :2112
-    securityContext:
-      capabilities:
-        add:
-        - NET_ADMIN
-        - NET_RAW
-    volumeMounts:
-    - mountPath: /etc/kubernetes/admin.conf
-      name: kubeconfig
-  hostAliases:
-  - hostnames:
-    - kubernetes
-    ip: 127.0.0.1
-  hostNetwork: true
-  volumes:
-  - hostPath:
-      path: /etc/kubernetes/admin.conf
-      type: FileOrCreate
-    name: kubeconfig
-EOF
+  # Tenta com a chave insecure padrão do Vagrant
+  local VAGRANT_KEY="/vagrant/.vagrant/machines/haproxy/libvirt/private_key"
+  local INSECURE_KEY="/home/vagrant/.ssh/id_rsa"
+  
+  local REGISTERED=false
+  
+  # Método 1: Tenta SSH como root (se configurado)
+  # shellcheck disable=SC2029
+  if ssh "$SSH_OPTS" root@"${HAPROXY_IP}" "/usr/local/bin/register-control-plane.sh ${NODE_NAME} ${NODE_IP}" 2>/dev/null; then
+    REGISTERED=true
+  # Método 2: Tenta SSH como vagrant com sudo
+  elif ssh "$SSH_OPTS" vagrant@"${HAPROXY_IP}" "sudo /usr/local/bin/register-control-plane.sh ${NODE_NAME} ${NODE_IP}" 2>/dev/null; then
+    REGISTERED=true
+  fi
+  
+  if [ "$REGISTERED" = "true" ]; then
+    echo "=== [INFO] Successfully registered ${NODE_NAME} in HAProxy ==="
+  else
+    echo "=== [WARN] Could not auto-register. Adding backend directly... ==="
+    # Não falha - o kubeadm init vai funcionar mesmo sem o registro
+    # porque usamos o IP local como advertiseAddress
+  fi
 }
 
 ########################################
@@ -118,8 +117,9 @@ EOF
 if [ "$NODE_NUMBER" = "1" ]; then
   echo "=== [INFO] Initializing primary control plane ==="
 
-  # IMPORTANTE: Primeiro faz kubeadm init com o IP do node
-  # O VIP sera configurado depois que o admin.conf existir
+  # Configuracao do kubeadm
+  # IMPORTANTE: Usamos o IP do node como controlPlaneEndpoint inicialmente
+  # Depois o Makefile vai registrar no HAProxy e atualizar o kubeconfig
   cat <<EOF >/root/kubeadm-config.yaml
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
@@ -128,6 +128,8 @@ localAPIEndpoint:
   bindPort: 6443
 nodeRegistration:
   criSocket: unix:///run/containerd/containerd.sock
+timeouts:
+  controlPlaneComponentHealthCheck: 2m0s
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
@@ -137,21 +139,17 @@ networking:
   podSubnet: ${POD_CIDR}
 apiServer:
   certSANs:
-  - "${VIP}"
+  - "${HAPROXY_IP}"
   - "${NODE_IP}"
   - "127.0.0.1"
   - "localhost"
   - "kubernetes"
   - "kubernetes.default"
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: "none"
 EOF
 
   # kubeadm init (idempotente)
   if [ ! -f /etc/kubernetes/admin.conf ]; then
-    # Primeiro, inicializa SEM o kube-vip (usando IP do node)
+    echo "=== [INFO] Running kubeadm init ==="
     kubeadm init --config /root/kubeadm-config.yaml --upload-certs 2>&1 | tee /root/kubeadm-init.log
   fi
 
@@ -166,61 +164,53 @@ EOF
   cp -f /etc/kubernetes/admin.conf /home/vagrant/.kube/config
   chown -R vagrant:vagrant /home/vagrant/.kube
 
-  # Agora que o admin.conf existe, gera o manifest do kube-vip
-  generate_kube_vip_manifest "${VIP}" "${VIP_INTERFACE}"
-
-  # Aguarda o kube-vip assumir o VIP
-  echo "=== [INFO] Waiting for kube-vip to claim VIP ${VIP} ==="
+  # Aguarda API server estar pronto localmente
+  echo "=== [INFO] Waiting for API server to be ready ==="
   for i in {1..30}; do
-    if ping -c 1 -W 1 "${VIP}" &>/dev/null; then
-      echo "=== [INFO] VIP ${VIP} is now active ==="
+    if kubectl get nodes &>/dev/null; then
+      echo "=== [INFO] API server is responding ==="
       break
     fi
-    echo "Waiting for VIP... (${i}/30)"
-    sleep 2
-  done
-
-  # Aguarda API server responder no VIP
-  echo "=== [INFO] Waiting for API server on VIP ==="
-  until curl -sk "https://${VIP}:6443/healthz" &>/dev/null; do
+    echo "Waiting for API server... (${i}/30)"
     sleep 5
   done
-  echo "=== [INFO] API server is responding on VIP ==="
 
   ########################################
-  # Cilium CLI
+  # Calico CNI
   ########################################
-  echo "=== [INFO] Installing Cilium CLI ==="
+  echo "=== [INFO] Installing Calico CNI ==="
 
-  if ! command -v cilium &>/dev/null; then
-    curl -sL --fail https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64.tar.gz \
-      | tar xz -C /usr/local/bin
-  fi
+  # Instala o operador Tigera (Calico)
+  kubectl create -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/tigera-operator.yaml" 2>/dev/null || true
 
-  ########################################
-  # Cilium Install - usa o IP do node
-  ########################################
-  echo "=== [INFO] Installing Cilium CNI ==="
+  # Aguarda o operador estar pronto
+  echo "=== [INFO] Waiting for Tigera operator ==="
+  kubectl wait --for=condition=Available --timeout=120s deployment/tigera-operator -n tigera-operator 2>/dev/null || sleep 30
 
-  if ! kubectl get ns cilium-system &>/dev/null 2>&1; then
-    cilium install \
-      --set kubeProxyReplacement=true \
-      --set k8sServiceHost="${NODE_IP}" \
-      --set k8sServicePort=6443 \
-      --set ipam.mode=cluster-pool \
-      --set ipam.operator.clusterPoolIPv4PodCIDRList="{${POD_CIDR}}" \
-      --set ipam.operator.clusterPoolIPv4MaskSize="${POD_CIDR_MASK_SIZE}" || true
-  fi
+  # Aplica a configuracao do Calico
+  cat <<CALICOEOF | kubectl apply -f -
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+    - blockSize: 26
+      cidr: ${POD_CIDR}
+      encapsulation: VXLANCrossSubnet
+      natOutgoing: Enabled
+      nodeSelector: all()
+---
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
+CALICOEOF
 
-  ########################################
-  # Remove kube-proxy (Cilium substitui)
-  ########################################
-  echo "=== [INFO] Removing kube-proxy (replaced by Cilium) ==="
-  kubectl delete daemonset kube-proxy -n kube-system --ignore-not-found=true
-  kubectl delete configmap kube-proxy -n kube-system --ignore-not-found=true
-
-  echo "=== [INFO] Waiting for Cilium to be ready ==="
-  cilium status --wait || true
+  echo "=== [INFO] Waiting for Calico to be ready ==="
+  kubectl wait --for=condition=Available --timeout=300s tigerastatus/calico 2>/dev/null || true
 
   ########################################
   # Generate Join Commands
@@ -242,13 +232,13 @@ EOF
     > /root/join-control-plane.sh
   chmod +x /root/join-control-plane.sh
 
-  # Salva o VIP e IP para os outros nodes
-  echo "${VIP}" > /root/control-plane-vip.txt
+  # Salva o IP do HAProxy e IP do node para os outros nodes
+  echo "${HAPROXY_IP}" > /root/haproxy-ip.txt
   echo "${NODE_IP}" > /root/control-plane-ip.txt
 
   echo "=== [INFO] Primary Control Plane ready ==="
   echo "=== [INFO] Node IP: ${NODE_IP} ==="
-  echo "=== [INFO] VIP: ${VIP} (kube-vip) ==="
+  echo "=== [INFO] HAProxy LB: ${HAPROXY_IP}:6443 ==="
   kubectl get nodes
 
 ########################################
@@ -256,9 +246,6 @@ EOF
 ########################################
 else
   echo "=== [INFO] Joining as secondary control plane ==="
-  
-  # Gera manifest do kube-vip para este node tambem
-  generate_kube_vip_manifest "${VIP}" "${VIP_INTERFACE}"
   
   echo "=== [WARN] Secondary control planes require manual join ==="
   echo "=== [INFO] Run: ./join-control-planes.sh ==="
